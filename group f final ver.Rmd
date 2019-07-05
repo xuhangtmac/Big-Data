@@ -1,0 +1,433 @@
+---
+title: "Group F final Airbnb project"
+output:
+  word_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r, message=FALSE, warning=FALSE}
+# Loading packages and datasets
+library(dplyr)
+library(plyr)
+library(tm)
+library(textcat)
+library(tidytext)
+library(ggplot2)
+library(tidyverse)
+library(tidyr)
+library(plotrix)
+library(GGally)
+library(ipred)
+library(rpart)
+library(rpart.plot)
+library(class)
+library(caret)
+library(randomForest)
+library(wordcloud)
+airbnb <- read.csv("~/Desktop/Analyzing big data2/final/listings.csv")
+review <- read.csv("~/Desktop/Analyzing big data2/final/reviews.csv", encoding="latin-1", stringsAsFactors=FALSE)
+tax <- read.csv("~/Desktop/Analyzing big data2/final/boston_property.csv")
+```
+# Executive summary: 
+In this project, our team is standing on the perspective of Airbnb.com. Our purpose is to create a predictive model, through which we can provide suggestions on an appropriate price range to the current and future property owners listed on Airbnb.    
+We work with a data set of around 4000 properties listed on Airbnb. The data set has 11 columns. The target variable is price and the 10 input variables address various aspects of an Airbnb property including host quality, house structure, review from guests and neighborhood income level, etc.
+To find a strongly predictive model, we use 5 models to predict price. The models are Linear Regression, Best-Pruned Tree, Bagged Tree, Random Forest and KNN. The model with the best performance is Random Forest, with a prediction accuracy of 66.23% on the validation set and 66.04% on the test set.
+The Random Forest model shows us the most important factors for predicting the price of an Airbnb property are housing structure, guest review and neighborhood income level. With the data from these aspects provided by the property owners, we can easily offer them suggestions in terms of the appropriate price range for their property. Airbnb can make profit in charging for pricing service, and also attract new hosts through lowering their risk of mispricing.
+
+# Introduction: 
+We choose to analyze the data from the perspective of Airbnb. The problem we want to solve is to predict appropriate price range of the property.
+As the popularity of using Airbnb instead of choosing hotel while travelling, more and more new hosts are willing to join Airbnb. Some of the hosts may have no idea about the how to price their property. Our model helps these new hosts pricing. When they register, they need to provide essential information about their property like property type, room type, bed number and their willingness of cancellation. Based on these information, Airbnb can predict a range of price for new hosts to price their property.
+Besides, this model can also help old hosts to find their accurate price level and then make adjustment. Some of the old hosts may not realise their nearby environment which can bring convenience to travellers and then get great comments from them. The appreciations and complaints from the comments or ratings can drive the price change. Old hosts may have a inappropriate estimation of the new price because of the lack of market. Our model can make suggestions of price range to the old hosts more accurately than their own estimation.
+
+# Data sources:
+The data sources we used below are listings.csv, review.csv, boston_property.csv(external) and crime.csv(external).
+Listings.csv. This document provides us the population of Airbnb properties in our analysis with features from different perspectives (i.e. price, property location, house structure).
+Review.csv. This document provides us the feedback from guests and we combine these information with listing.csv using 'house id'.
+Boston_property.csv. This document provides us the tax expense with certain properties and we use these information to generate living standards factor of different areas (related to zip codes).
+
+And we decide to include below variables in our model. 
+## From listing.csv,
+Id: A numeric variable which is the unique id for certain property.
+Host_is_superhost: a categorical variable which reflect host's qualifications.
+Host_identity_verified: a categorical variable which means whether the hosts' identity is verified by Airbnb.
+Property_type: A categorical variable which shows different kinds of properties.
+Room_type: A categorical variable which shows whether the guests need to sharing room or not.
+Bathrooms & beds: Numerical variables. The number of bathrooms and beds.
+Bed_types: A categorical variable which shows different types of offered beds.
+Price: Our target variable. A numerical variable which is the certain price of the property.
+Minimum_nights: A numerical variable which reflects host's request of minimum nights.
+Cancellation_policy: a categorical variable which reflects the ease to cancel an order.
+## From review.csv,
+Total_score: A numerical variable reflects an average level that guests thought about the experience of stay in the property which is calculated by using AFINN to score the comments of each id.
+## From boston_property.csv,
+Tax: The average gross tax of a district separated by zipcode, a numerical variable which reflects the income condition of this district.
+
+```{r, message=FALSE, warning=FALSE}
+# Calculate review score
+review <- review[,c(1,6)]
+set.seed(54)
+
+## Randomly select 5 comments with replacement based on each id
+review<-ddply(review,.(listing_id),function(x) x[sample(nrow(x),5,replace = T),])  
+## Select English reviews
+review$language<-textcat(review[,2])
+review<-subset(review,language=="english")
+
+## Combine comments of each id
+review2<-review[,c(1,2)]
+review2[,1]<-as.factor(review2$listing_id)
+review2 <- ddply(review2, .(listing_id), summarize,
+                 comment=paste(comments,collapse=","))
+review3<-data.frame(review2[,-1])
+row.names(review3)<-review2$listing_id
+colnames(review3)<-"comments"
+
+## Clean corpus
+review3 <- as.character(review3$comments)
+review_source<-VectorSource(review3)
+review_corpus<-VCorpus(review_source)
+exceptions <- grep(pattern = "not|n't", x = stopwords(), value = TRUE)
+my_stopwords <- setdiff(stopwords("en"), exceptions)
+clean_corpus <- function(corpus){
+  corpus <- tm_map(corpus, removePunctuation)
+  corpus <- tm_map(corpus, stripWhitespace)
+  corpus <- tm_map(corpus, removeNumbers)
+  corpus <- tm_map(corpus, content_transformer(tolower))
+  corpus <- tm_map(corpus, removeWords, 
+                   c(my_stopwords, "boston","stay","place","really","everything","home","definitely","also","just","made","back","get","one"))
+  return(corpus)
+}
+clean_corp<-clean_corpus(review_corpus)
+
+## Calculate scores
+rev_df_new<-data.frame(text = sapply(clean_corp, as.character), stringsAsFactors = FALSE)
+rev_df_new$document<-c(1:nrow(rev_df_new))
+rev_df_new$id<-review2[,1]
+review_tdm <- TermDocumentMatrix(clean_corp)
+rev_tidy<-tidy(review_tdm)
+afinn <- get_sentiments("afinn")
+rev_afinn <- rev_tidy %>% 
+
+  # Inner Join to AFINN lexicon
+  inner_join(afinn, by = c("term" = "word"))
+rev_afinn$t_score<-rev_afinn$score*rev_afinn$count
+rev_afinn[,3]<-NULL
+rev_afinn[,3]<-NULL
+rev_afinn_agg<-aggregate(rev_afinn$t_score, by=list(rev_afinn$document), FUN=sum)
+colnames(rev_afinn_agg)<-c("document","total_score")
+rev_afinn_agg$document<-as.integer(rev_afinn_agg$document)
+rev_df_new<-rev_df_new %>%
+  inner_join(rev_afinn_agg,by =c("document"="document"))
+
+# Add score to airbnb dataset
+airbnb$id<-as.factor(airbnb$id)
+airbnb<- airbnb %>%
+  inner_join(rev_df_new[,c(3,4)], by=c("id"="id"))
+
+# Add tax to airbnb dataset
+tax <- na.omit(tax[,c(5,17)])
+tax$ZIPCODE <- paste0("0", tax$ZIPCODE)
+tax<-tax %>%
+  dplyr::group_by(ZIPCODE)%>%
+  dplyr::summarise(tax = median(GROSS_TAX))
+airbnb <- airbnb %>%
+  inner_join(tax, by = c("zipcode" = "ZIPCODE"))
+```
+
+```{r, message=FALSE, warning=FALSE}
+# First-step data processing for Best-Pruned Tree, Bagged Tree and Random Forest
+airbnb2 <- airbnb[,c(1,29,37,52,53,55,57,58,61,68,80,92,97,98)] 
+airbnb2$price<-as.numeric(gsub("\\$","", as.character(airbnb2$price)))
+airbnb2 <- subset(airbnb2,price!=0)
+airbnb2 <- subset(airbnb2,beds!=0)
+airbnb2 <- na.omit(airbnb2)
+airbnb2$price<-cut(airbnb2$price, br=c(0,100,200,300,1000), labels = NULL,
+                   include.lowest = TRUE, right = TRUE, dig.lab = 3,
+                   ordered_result = FALSE)
+airbnb2$bathbed <- airbnb2$bathrooms/airbnb2$beds
+airbnb2 <- airbnb2[,-c(1,6,7,11)]
+
+# Split dataset into trainging set, validation set and test set
+set.seed(199554)  
+train.index <- sample(c(1:dim(airbnb2)[1]), dim(airbnb2)[1]*0.7)  
+train <- airbnb2[train.index, ]
+test.df <- airbnb2[-train.index, ]
+train.index2 <- sample(c(1:dim(train)[1]), dim(train)[1]*0.8)
+train.df <- train[train.index2, ]
+valid.df <- train[-train.index2, ]
+```
+
+# Data cleaning and pre-processing:
+```{r, message=FALSE, warning=FALSE}
+# First-step data processing for Linear Regression and KNN
+airbnb3 <- airbnb[,c(1,29,37,52,53,55,57,58,61,68,80,92,97,98)] 
+airbnb3$host_is_superhost<-ifelse(airbnb3$host_is_superhost=="t",1,0)
+airbnb3$host_identity_verified<-ifelse(airbnb3$host_identity_verified=="t",1,0)
+airbnb3$apartment<-ifelse(airbnb3$property_type=="Apartment",1,0)
+airbnb3$private_room<-ifelse(airbnb3$room_type=="Private room",1,0)
+airbnb3$realbed <- ifelse(airbnb3$bed_type == "Real Bed", 1, 0)
+airbnb3$price<-as.numeric(gsub("\\$","", as.character(airbnb3$price)))
+airbnb3 <- subset(airbnb3,beds!=0)
+airbnb3$bathbed <- airbnb3$bathrooms/airbnb3$beds
+airbnb3$cancel_ease <- as.numeric(revalue(airbnb3$cancellation_policy,c("flexible"=5,"moderate"=4,"strict"=3,"super_strict_30"=2,"super_strict_60"=1)))
+airbnb4 <- na.omit(airbnb3[,-c(1,4,5,6,7,8,11,12)])
+
+# Split dataset into trainging set, validation set and test set
+set.seed(199554)  
+train.index4 <- sample(c(1:dim(airbnb4)[1]), dim(airbnb4)[1]*0.7)  
+train4 <- airbnb4[train.index4, ]
+test.df4 <- airbnb4[-train.index4, ]
+train.index5 <- sample(c(1:dim(train4)[1]), dim(train4)[1]*0.8)
+train.df2 <- train4[train.index5, ]
+valid.df2 <- train4[-train.index5, ]
+```
+
+Data cleaning and pre-processing is the most crucial part for data analyst. The following is what we do to get our data ready for analysis.
+
+-Data reduction
+First we deal with rows. We have more than 120 thousand rows in 'review' dataset, more than 170 thousand rows in the 'tax' data set and 4870 rows in the 'airbnb' data set. The huge amount of data can make code running super slow and even cause breakdown to our computers, so we need to sample. We inner join the reviews in the 'review' data set to the 'airbnb' data set by 'listing id', then we sample 5 reviews under each listing id to get 1 total_score for each listing id. And we also inner join tax in the 'tax' data set to the 'airbnb' data set by 'zipcode'.  In this way, we shorten our data set down to around 4000 rows in total.
+
+Then we look at columns. With the inner joined variables('total_score' and 'tax') added, we have 98 columns in the 'listing' data set. We go through the listing dataset and pick whatever we believed can influence of the price of airbnb housing. Out of 98 variables, we get 27 -- still a huge dimension which can cause serious overfitting and difficulty in code running. In addition, as most of the variables are categorical variables, it's hard to run correlation. Therefore, to reduce dimensionality, we look through our data, and kick out the ones with a lot of missing values and the ones that are highly clustered at certain levels, for the variables that obviously have causal effect on each other, we pick the most representative. 
+
+Also, we merge some variables to get new variables to both reduce dimension and increase the informativity of the variable. For example, we divide 'bathrooms' with 'beds' and get a new variable 'bathbed' to represent the access of bathroom per guest, which can show the comfortability of the housing. In order to avoid 'Inf's in the variable, we eliminate the rows where beds == 0 prior to the division. Finally we come down to 10 input variables and our target variable 'price'. 
+
+-Transformation. 
+Inder to handle different models, we set 2 data sets with same variables and observations but totally different data types.
+
+For classification models, we transformed the target variable 'price' to a categorical variable. According to the density distribution graph of price, we find that most of the airbnb housing are priced at $0-$200. For better segmentation, we cut out the levels of price as '[0, 100]', '(100, 200]', '(200, 300]' and '[300, 1000]'. All the input variables are kept as their own data types.
+
+For linear regression, we make all the variables numeric. We transform the categorical variables that are highly unbalanced into dummies. For example, the 'property_type' variable has 17 levels but there are 2546 'Apartment's, more than 2/3 of sample size. Therefore, we believe it is safe to transform the 'property_type' variable into one dummy where 'Apartment' is 1 and all other types is 0. For other categorical variables whose levels are in sequence, we transform them into integer variables. For example, the 5 levels of 'cancellation_policy' describe the easiness of cancellation, so we transform the levels into integer 1-5 and put them into a new variable called 'cancellation_ease' .
+
+Each model can have different requirements on data type, the detailed data cleaning and transformation for modeling will be introduced later in the modeling part.
+
+-Missing Data
+As we already kicked out the variables with great amount of missing value, we regard the missing value left in our data set as missing at random, which won't cause problems to our analysis. Although classification tree models can deal with missing data, we still eliminate all of them to keep the data size same for all of our models. 
+
+Finally we get our dataset 'airbnb2' with 3807 observations and the following variables:
+Target Variable: price
+Input variable: host_is_superhost, host_identity_verified, property_type, room_type, bed_type, minimum_nights, cancellation_policy, total_score, tax, bathbed.
+
+```{r}
+## Distribution of target variable
+prs_plot <- plot(density(airbnb4$price), main = "Density Distrbution of Price")
+
+##Correlation matrix of all the variables
+ggcorr(airbnb4, label=TRUE, cex=3)
+
+##Correlation and distribution of all the input variables
+ggpairs(airbnb4[,-3], upper = list(continuous = wrap("cor", size = 3)))
+```
+
+# Data exploration and initial investigation:
+We use the price variable from listing.csv document as our target variable and the distribution of this variable shows some characteristics:
+The distribution is right skewed and the mean is larger than the median with several extreme values that can not be ignored.
+The distribution can easily be divided into four parts for classification purpose - 'Economic' for 0-100, 'Basic' for 100-200, 'Business' for 200-300 and 'Luxury' for 300-1000. About half of the price values locate in 'Economic' section, and around another half values locate in 'Basic' and 'Business' sections. 'Luxury' section only contains a few values.
+We analyze the correlation relationships between all variables. And the graph shows that most of the variables are not strongly related to each other. The strongest relationship is between the target variable price and whether the room is provided privately and the value is negatively 0.5. Since it is lower than 0.6, we think that between most pairs of variables there are no linear relationships.
+
+# Discussion of modeling strategy: 
+
+## Model 1 Linear Regression
+```{r}
+reg<-lm(price~., data=train4)
+summary(reg)
+```
+
+We run linear regression of price on all the other variables, get the results showed below. 
+
+The Adjusted R-squared is  0.3468. Although it's not bad for econometrics analysis, it's rather weak for predicting price in our case. According to the t value, the most important variables for this linear regression are: private_room, tax, bathbed, apartment, and cancel_ease.
+
+The Strength of linear regression is that theoretically it can provide an exact prediction of the target variable. However, it is hard to get a linear model that fits perfectly in the real world, that is to say, in the real cases, Adjusted R-squared is usually low so the prediction accuracy of the linear regression model is low.
+
+## Model 2 Best pruned tree
+```{r, warning=FALSE}
+## Cross validation
+cv.ct <- rpart(price ~ ., data = train.df, method = "class", 
+               cp = 0.0001, minsplit = 1, xval = 5)
+
+## Print out the cp table of cross-validation errors 
+printcp(cv.ct)
+
+## Choose a cp when split=22, although it do not have min xerror
+pruned.ct <- prune(cv.ct, cp =  0.00169101 )
+prp(pruned.ct, type = 1, extra = 1, under = TRUE, split.font = 2, varlen = -10, 
+    box.col=ifelse(pruned.ct$frame$var == "<leaf>", 'gray', 'white')) 
+summary(pruned.ct)
+
+class_prediction <- predict(object = pruned.ct,  
+                            newdata = valid.df,   
+                            type = "class")  
+
+## Calculate the confusion matrix for the validation set
+matrix<- confusionMatrix(data = class_prediction,       
+                     reference = valid.df$price)  
+matrix
+```
+
+Then we use classification tree to predict the price range by using all the inputs variables in airbnb2 dataset. First, we practice a cross validation in order to control the overfitting. Then, we choose the cp value which has the lowest xerror to prune the tree to 22 splits.
+In the best pruned tree, the most important variables are room type, tax, property type, bathbed and minimum nights.
+As shown in the confusion matrix, the total accuracy of pruned tree is 64.54%, which is much higher than no information rate 39.4%. It suggests that the pruned tree is able to predict the price range at certain accuracy. But the specificity of class (200,300] is 1, which means that pruned tree predict (200,300] totally wrong. The pruned tree is not a good model for prediction.
+
+## Model 3 Bagged tree
+```{r, warning=FALSE}
+set.seed(54)
+## Choose cross validation method and the fold number is 5
+ctrl <- trainControl(method = "cv",number = 5)
+
+## Set max depth to control overfitting
+bag.cv <- train(price ~ .,
+                data = train.df, 
+                method = "treebag",
+                metric = "Accuracy",
+                trControl = ctrl,
+                max_depth=3)
+
+## Have a look at variable importance
+varImp(bag.cv)
+
+## Predict price by using validation dataset
+class_prediction2 <- predict(bag.cv, valid.df, type = "raw") 
+table(class_prediction2)
+
+## Exhibit confusion matrix 
+confusionMatrix(data = class_prediction2,       
+                reference = valid.df$price)
+```
+
+In bagged tree, we put all the variables into the model and let the algorithm to choose.
+We set cross validation fold number as 5 and limit the max depth in case of overfitting. As shown below, the most vital variables of bagged tree are total score, tax, minimum nights, bathbed and host identity. 
+According to the confusion matrix, the total accuracy of bagged tree is 62.66%, which is higher than no information rate 39.4%. This means that bagged tree has certain ability to predict the price range.
+However, when we look at the sensitivity of each class, the accuracy of predicting class (200,300] and (300, 1000] is much lower than the specificity, which suggests that bagged tree has poor ability to predict business and luxury level of price range.
+
+## Model 4 KNN Model
+```{r, results='hide', warning=FALSE}
+## KNN Data Process
+normalize <- function(x){
+  return ((x-min(x))/(max(x)-min(x)))
+}
+train.knn <- train.df2
+valid.knn <- valid.df2
+knnpreprocess <- function(df){
+  df$price<-cut(df$price, br=c(0,100,200,300,1000), labels = NULL,
+                   include.lowest = TRUE, right = TRUE, dig.lab = 3,
+                   ordered_result = FALSE)
+  df$minimum_nights <- normalize(df$minimum_nights)
+  df$total_score <- normalize(df$total_score)
+  df$tax <- normalize(df$tax)
+  df$bathbed <- normalize(df$bathbed)
+  df$cancel_ease <- normalize(df$cancel_ease)
+  return(df)
+}
+train.knn <- knnpreprocess(train.knn)
+valid.knn <- knnpreprocess(valid.knn)
+
+## Select best K using accuracy method
+accuracy.df <- data.frame(k=seq(1,15,1),accuracy = rep(0,15))
+for(i in 1:15){
+  knn.pred <- knn(train.knn[,-c(3)],valid.knn[,-c(3)],cl=train.knn$price,k=i)
+  accuracy.df[i,2] <- confusionMatrix(knn.pred,valid.knn$price)$overall[1]
+}
+accuracy.df
+price_pred <- knn(train.knn[,-c(3)], valid.knn[,-c(3)], cl=train.knn$price,k=13)
+price_actual <- valid.knn$price
+
+## Calculate the confusion matrix for the train set
+confusionMatrix(data = price_pred,       
+                reference = price_actual)
+mean(price_actual==price_pred)
+```
+
+In KNN model, we first transform all data in the training set into numeric forms and then using max-min method to normalize numeric variables. We use all independent variables in the model and use accuracy method to derive best k for the model, which equals to 13.
+According to the confusion matrix, the total accuracy of KNN model is 62.73%, also higher than the information rate. And similar to bagge tree, the model also has the same bad ability to predict business and luxury level of price range.
+
+## Model 5 Random Forest
+```{r}
+## Train a Random Forest
+set.seed(1)
+res <- tuneRF(x = subset(train.df, select = -price),
+              y = train.df$price,
+              ntreeTry = 500)
+
+## Find the mtry value that minimizes OOB Error
+mtry_opt <- res[,"mtry"][which.min(res[,"OOBError"])]
+print(mtry_opt)
+set.seed(54)  # for reproducibility
+airbnb_model <- randomForest(formula = price ~ ., 
+                              data = train.df, mtry=mtry_opt)
+
+## Print the model output                             
+print(airbnb_model)
+
+## Generate predicted classes using the model object
+class_prediction <- predict(object = airbnb_model,   # model object 
+                            newdata = valid.df,  # test dataset
+                            type = "class") # return classification labels
+
+## Calculate the confusion matrix for the test set
+cm <- confusionMatrix(data = class_prediction,       # predicted classes
+                      reference = valid.df$price)  # actual classes
+print(cm)
+
+importance(airbnb_model)
+```
+
+# Model Comparison: 
+First we can rule out Linear Regression because the fit of the model is low, indicating limited predicting power.After serious comparison, we decide to choose Random Forest as our best model. The reasons are as follow:
+-Random Forest has the highest prediction accuracy, 66.23%,  among the 4 classification models;
+-Random Forest can select variables and handle missing data by itself and it demonstrates importance of variables easily.
+-Although it cannot show classification criteria, it is not a problem for our purpose, which is predict price with data input from the hosts.
+
+
+# Key Insights: 
+```{r}
+class_prediction <- predict(object = airbnb_model,   # model object 
+                            newdata = test.df,  # test dataset
+                            type = "class") # return classification labels
+cm2 <- confusionMatrix(data = class_prediction,       # predicted classes
+                      reference = test.df$price)  # actual classes
+cm2
+```
+
+```{r, message=FALSE, warning=FALSE}
+# Comparison Cloud
+## Filter the positive review with total score more than 30, and negative review with total score less than 0
+moby_tidy_small2 <- rev_afinn_agg %>% 
+  filter(total_score >= 0 |total_score <=0 ) 
+## Add label as positive and negative to reviews
+moby_tidy_pol2 <- moby_tidy_small2 %>% 
+  mutate(
+    pol = ifelse(total_score>0, "positive", "negative"))
+head(moby_tidy_pol2)
+## Seperate postive and negative reviews into two datasets
+pos2<-subset(moby_tidy_pol2,pol=="positive")
+neg2<-subset(moby_tidy_pol2,pol=="negative")
+## Insert review context into two datasets
+pos2<-rev_df_new[rev_df_new$document %in% pos2$document,]
+neg2<-rev_df_new[rev_df_new$document %in% neg2$document,]
+## Combine two datasets
+all_pos2 <- paste(pos2$text, collapse = " ")
+all_neg2 <- paste(neg2$text, collapse = " ")
+all2 <- c(all_pos2, all_neg2)
+## Transform into tdm
+all_source2 <- VectorSource(all2)
+all_corpus2 <- VCorpus(all_source2)
+all_tdm2 <- TermDocumentMatrix(all_corpus2)
+colnames(all_tdm2) <- c("positive review", "negative review")
+## Transform tdm into matrix
+all_m2 <- as.matrix(all_tdm2)
+comparison.cloud(all_m2,
+                 max.words = 200,
+                 colors = c("darkgreen", "darkred"))
+```
+
+Based on our previous analysis, we would like to choose random forest model as our best model to predict the possible range for new Airbnb hosts. It shows a 66.04% accuracy which is best among all previous classification models. The model accuracy based on test dataset is 66.32%, and these two accuracies show that the random forest model performs steadily well.
+
+The analysis of variables' importance in random forest model shows the following five important variables in decreasing order - room_type, tax, total_score, bathbed and property_type. Except from total_score, the other four variables are direct factors relative to properties. Different property and room type will provide various living environment, and how many beds can determine how many people can live. Thus, price varies between different levels of these factors. Also, the tax reflects the living standards of the neighbourhood where the property locates. High quality neighborhood should have higher price. The total score reflects the historical attitudes of guests towards the stay and this factor indicates significantly why hosts can charge more and what hosts can do to improve guests' experience. And after analyzing the feedback from the guests, we find that location and cleanliness are what guests may commonly concern. In a word, the city facilities around the property and how much clean the host cares about its property will have an impact on the pricing strategy. 
+
+According to correlation graph and based on these factors, we can say that a host who owns an apartment with non-private room in wealthy community with relative more beds compared to bathrooms can charge more on guests. And this conclusion is somehow similar to experiences in real world.
+
+# Conclusions:
+Given the direct information provided by hosts and combined with implied information derived from guests' comments, our model can help hosts to price. 
+Based on the direct information like room type, bath to bed ratio and tax, a price range can be classified. And after including the comments' score of guests, there is a certain fluctuation in the previous classified price range ,which makes the pricing more accurate. In conclusion, if the hosts can provide the essential information to Airbnb, airbnb can give a price range back to the hosts.
+For Airbnb, it can use this model as a bonus provided to new hosts and attracts more hosts. Airbnb can promise that if hosts join Airbnb, it can give a suggestion of accurate price range when they finish the required collection of information. 
+Or, Airbnb can charge an add-on fee on old hosts if they want to know whether their price is reasonable or not.
